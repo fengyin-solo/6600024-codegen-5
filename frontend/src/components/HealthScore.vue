@@ -182,7 +182,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed } from 'vue'
 import { Timer, Cpu, Monitor, DataLine } from '@element-plus/icons-vue'
 import { useOpcuaStore } from '../store/opcua'
 import type { DeviceHealthScore, NodeHealthDetail } from '../types'

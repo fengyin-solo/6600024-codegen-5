@@ -168,6 +168,12 @@ function toggleConnection() {
     ElMessage.warning('已断开 OPC-UA 连接')
   } else {
     store.connect()
+    store.simulateDataUpdate()
+    store.simulateDataUpdate()
+    store.simulateDataUpdate()
+    store.simulateDataUpdate()
+    store.simulateDataUpdate()
+    store.calculateAllHealthScores()
     startSimulation()
     startHealthScoreCalculation()
     ElMessage.success('已连接 OPC-UA 服务器')
@@ -181,7 +187,6 @@ function startSimulation() {
 }
 
 function startHealthScoreCalculation() {
-  setTimeout(() => store.calculateAllHealthScores(), 100)
   healthTimer.value = window.setInterval(() => {
     store.calculateAllHealthScores()
   }, 5000)
@@ -213,6 +218,8 @@ function formatTime(timestamp: number): string {
 
 onMounted(() => {
   store.connect()
+  for (let i = 0; i < 5; i++) store.simulateDataUpdate()
+  store.calculateAllHealthScores()
   startSimulation()
   startHealthScoreCalculation()
 })

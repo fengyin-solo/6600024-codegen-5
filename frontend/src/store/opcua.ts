@@ -451,9 +451,10 @@ export const useOpcuaStore = defineStore('opcua', () => {
       details.push({
         nodeId: node.id,
         nodeName: node.name,
-        quality: node.quality || 'Good',
+        quality: (node.quality || 'Good') as 'Good' | 'Bad' | 'Uncertain',
         currentValue: val,
         unit: node.unit,
+        dataType: node.dataType,
         fluctuationRate: Math.round(fluctuationRate * 100) / 100,
         alarmCount: nodeAlarms.length,
         highestAlarmSeverity: highest

@@ -80,6 +80,7 @@ export interface NodeHealthDetail {
   quality: 'Good' | 'Bad' | 'Uncertain'
   currentValue: number
   unit?: string
+  dataType?: string
   fluctuationRate: number
   alarmCount: number
   highestAlarmSeverity: string
