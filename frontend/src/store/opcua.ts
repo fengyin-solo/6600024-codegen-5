@@ -1,6 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { OPCUANode, DataValue, AlarmEvent, SubscriptionConfig } from '../types'
+import type {
+  OPCUANode, DataValue, AlarmEvent, SubscriptionConfig,
+  DeviceHealthScore, DimensionScore, NodeHealthDetail, RiskLevel
+} from '../types'
 
 export const useOpcuaStore = defineStore('opcua', () => {
   // 状态
@@ -11,6 +14,7 @@ export const useOpcuaStore = defineStore('opcua', () => {
   const realTimeData = ref<Map<string, DataValue>>(new Map())
   const isConnected = ref(false)
   const dataHistory = ref<Map<string, Array<{ timestamp: number; value: number }>>>(new Map())
+  const healthScores = ref<DeviceHealthScore[]>([])
 
   // 初始化模拟节点树
   function initNodeTree() {
@@ -263,6 +267,294 @@ export const useOpcuaStore = defineStore('opcua', () => {
     alarms.value = []
   }
 
+  // ===== 设备健康评分逻辑 =====
+  const QUALITY_WEIGHT = 0.30
+  const ALARM_WEIGHT = 0.40
+  const FLUCTUATION_WEIGHT = 0.30
+
+  const SEVERITY_SCORE: Record<string, number> = {
+    Critical: 0,
+    High: 25,
+    Medium: 55,
+    Low: 80,
+    Info: 95
+  }
+
+  const DEVICE_IDS = ['plc_area1', 'plc_area2']
+  const NODE_DEVICE_MAP: Record<string, string> = {
+    temp_sensor: 'plc_area1',
+    pressure_transmitter: 'plc_area1',
+    pump_status: 'plc_area1',
+    flow_meter: 'plc_area2',
+    valve_position: 'plc_area2',
+    motor_speed: 'plc_area2'
+  }
+
+  function getDeviceNodes(deviceId: string): OPCUANode[] {
+    const variables: OPCUANode[] = []
+    function traverse(nodes: OPCUANode[]) {
+      nodes.forEach(node => {
+        if (node.id === deviceId && node.children) {
+          node.children.forEach(c => {
+            if (c.type === 'Variable') variables.push(c)
+          })
+          return
+        }
+        if (node.children) traverse(node.children)
+      })
+    }
+    traverse(nodeTree.value)
+    return variables
+  }
+
+  function findNodeById(id: string): OPCUANode | undefined {
+    function search(nodes: OPCUANode[]): OPCUANode | undefined {
+      for (const n of nodes) {
+        if (n.id === id) return n
+        if (n.children) {
+          const f = search(n.children)
+          if (f) return f
+        }
+      }
+      return undefined
+    }
+    return search(nodeTree.value)
+  }
+
+  function calculateQualityScore(nodes: OPCUANode[]): number {
+    if (nodes.length === 0) return 0
+    let good = 0, uncertain = 0, bad = 0
+    nodes.forEach(node => {
+      const q = node.quality || 'Good'
+      if (q === 'Good') good++
+      else if (q === 'Uncertain') uncertain++
+      else if (q === 'Bad') bad++
+      else good++
+    })
+    const total = Math.max(1, good + uncertain + bad)
+    return Math.round((good * 100 + uncertain * 60 + bad * 0) / total)
+  }
+
+  function calculateAlarmScore(deviceId: string): number {
+    const cutoff = Date.now() - 5 * 60 * 1000
+    const deviceAlarms = alarms.value.filter(a => {
+      const mappedDevice = NODE_DEVICE_MAP[extractNodeIdFromNodeIdStr(a.nodeId)] || ''
+      return (a as any).deviceId === deviceId || mappedDevice === deviceId
+    }).filter(a => a.timestamp >= cutoff)
+
+    if (deviceAlarms.length === 0) return 100
+
+    const severityOrder = ['Critical', 'High', 'Medium', 'Low', 'Info']
+    let highest = 'Info'
+    let unacked = 0
+    deviceAlarms.forEach(a => {
+      if (severityOrder.indexOf(a.severity) < severityOrder.indexOf(highest)) {
+        highest = a.severity
+      }
+      if (!a.acknowledged) unacked++
+    })
+
+    const base = SEVERITY_SCORE[highest] ?? 95
+    const penalty = Math.min(unacked * 5, 25)
+    return Math.max(0, base - penalty)
+  }
+
+  function extractNodeIdFromNodeIdStr(nodeIdStr: string): string {
+    for (const [k, v] of Object.entries(NODE_DEVICE_MAP)) {
+      if (nodeIdStr.includes(k)) return k
+    }
+    return nodeIdStr
+  }
+
+  function calculateMean(data: number[]): number {
+    return data.reduce((s, v) => s + v, 0) / data.length
+  }
+
+  function calculateStdDev(data: number[], mean: number): number {
+    const sumSq = data.reduce((s, v) => s + (v - mean) * (v - mean), 0)
+    return Math.sqrt(sumSq / data.length)
+  }
+
+  function calculateFluctuationScore(nodes: OPCUANode[]): number {
+    if (nodes.length === 0) return 100
+    let total = 0
+    let count = 0
+
+    nodes.forEach(node => {
+      if (node.dataType === 'Boolean') return
+      const history = dataHistory.value.get(node.id) || []
+      if (history.length < 5) {
+        total += 90
+        count++
+        return
+      }
+      const values = history.map(h => h.value)
+      const mean = calculateMean(values)
+      const std = calculateStdDev(values, mean)
+      const cv = mean === 0 ? 0 : (std / Math.abs(mean)) * 100
+
+      let score: number
+      if (cv < 2) score = 100
+      else if (cv < 5) score = 85
+      else if (cv < 10) score = 65
+      else if (cv < 15) score = 45
+      else score = 25
+
+      total += score
+      count++
+    })
+
+    if (count === 0) return 100
+    return Math.round(total / count)
+  }
+
+  function applyRiskLevel(totalScore: number): { level: RiskLevel; label: string; color: string } {
+    if (totalScore >= 90) return { level: 'EXCELLENT', label: '优秀', color: '#10b981' }
+    if (totalScore >= 75) return { level: 'GOOD', label: '良好', color: '#22d3ee' }
+    if (totalScore >= 60) return { level: 'FAIR', label: '一般', color: '#eab308' }
+    if (totalScore >= 40) return { level: 'WARNING', label: '警告', color: '#f97316' }
+    return { level: 'CRITICAL', label: '危险', color: '#ef4444' }
+  }
+
+  function buildNodeDetails(deviceId: string, nodes: OPCUANode[]): NodeHealthDetail[] {
+    const cutoff = Date.now() - 5 * 60 * 1000
+    const details: NodeHealthDetail[] = []
+
+    nodes.forEach(node => {
+      if (node.type !== 'Variable') return
+
+      const history = dataHistory.value.get(node.id) || []
+      let fluctuationRate = 0
+      if (history.length >= 5) {
+        const values = history.map(h => h.value)
+        const mean = calculateMean(values)
+        const std = calculateStdDev(values, mean)
+        fluctuationRate = mean === 0 ? 0 : (std / Math.abs(mean)) * 100
+      }
+
+      const nodeAlarms = alarms.value.filter(a => {
+        const mapped = NODE_DEVICE_MAP[extractNodeIdFromNodeIdStr(a.nodeId)]
+        return (extractNodeIdFromNodeIdStr(a.nodeId) === node.id || a.nodeId.includes(node.name))
+          && a.timestamp >= cutoff
+      })
+
+      const severityOrder = ['Critical', 'High', 'Medium', 'Low', 'Info']
+      let highest = 'None'
+      nodeAlarms.forEach(a => {
+        if (highest === 'None' || severityOrder.indexOf(a.severity) < severityOrder.indexOf(highest)) {
+          highest = a.severity
+        }
+      })
+
+      const val = typeof node.value === 'number' ? node.value : 0
+
+      details.push({
+        nodeId: node.id,
+        nodeName: node.name,
+        quality: node.quality || 'Good',
+        currentValue: val,
+        unit: node.unit,
+        fluctuationRate: Math.round(fluctuationRate * 100) / 100,
+        alarmCount: nodeAlarms.length,
+        highestAlarmSeverity: highest
+      })
+    })
+
+    return details
+  }
+
+  function calculateAllHealthScores(): DeviceHealthScore[] {
+    const scores: DeviceHealthScore[] = []
+    for (const deviceId of DEVICE_IDS) {
+      const deviceNode = findNodeById(deviceId)
+      const variableNodes = getDeviceNodes(deviceId)
+
+      const qualityScore = calculateQualityScore(variableNodes)
+      const alarmScore = calculateAlarmScore(deviceId)
+      const fluctuationScore = calculateFluctuationScore(variableNodes)
+
+      const total = Math.round(
+        qualityScore * QUALITY_WEIGHT +
+        alarmScore * ALARM_WEIGHT +
+        fluctuationScore * FLUCTUATION_WEIGHT
+      )
+      const risk = applyRiskLevel(total)
+
+      const qualityDetail = buildQualityDetail(variableNodes)
+      const alarmDetail = buildAlarmDetail(deviceId)
+      const fluctuationDetail = buildFluctuationDetail(variableNodes)
+
+      scores.push({
+        deviceId,
+        deviceName: deviceNode?.name || deviceId,
+        description: deviceNode?.description,
+        totalScore: total,
+        riskLevel: risk.level,
+        riskLevelLabel: risk.label,
+        riskColor: risk.color,
+        qualityScore: {
+          score: qualityScore,
+          weight: QUALITY_WEIGHT,
+          weightedScore: Math.round(qualityScore * QUALITY_WEIGHT * 100) / 100,
+          detail: qualityDetail
+        },
+        alarmScore: {
+          score: alarmScore,
+          weight: ALARM_WEIGHT,
+          weightedScore: Math.round(alarmScore * ALARM_WEIGHT * 100) / 100,
+          detail: alarmDetail
+        },
+        fluctuationScore: {
+          score: fluctuationScore,
+          weight: FLUCTUATION_WEIGHT,
+          weightedScore: Math.round(fluctuationScore * FLUCTUATION_WEIGHT * 100) / 100,
+          detail: fluctuationDetail
+        },
+        nodeDetails: buildNodeDetails(deviceId, variableNodes),
+        updateTime: Date.now()
+      })
+    }
+    healthScores.value = scores
+    return scores
+  }
+
+  function buildQualityDetail(nodes: OPCUANode[]): string {
+    let good = 0, uncertain = 0, bad = 0
+    nodes.forEach(n => {
+      if (n.type !== 'Variable') return
+      const q = n.quality || 'Good'
+      if (q === 'Good') good++
+      else if (q === 'Uncertain') uncertain++
+      else if (q === 'Bad') bad++
+    })
+    return `正常:${good} 不确定:${uncertain} 异常:${bad}`
+  }
+
+  function buildAlarmDetail(deviceId: string): string {
+    const cutoff = Date.now() - 5 * 60 * 1000
+    const records = alarms.value.filter(a => {
+      const mapped = NODE_DEVICE_MAP[extractNodeIdFromNodeIdStr(a.nodeId)]
+      return mapped === deviceId && a.timestamp >= cutoff
+    })
+    const unacked = records.filter(a => !a.acknowledged).length
+    return `近5分钟报警${records.length}条(未确认${unacked}条)`
+  }
+
+  function buildFluctuationDetail(nodes: OPCUANode[]): string {
+    const parts: string[] = []
+    nodes.forEach(node => {
+      if (node.type !== 'Variable' || node.dataType === 'Boolean') return
+      const history = dataHistory.value.get(node.id) || []
+      if (history.length < 5) return
+      const values = history.map(h => h.value)
+      const mean = calculateMean(values)
+      const std = calculateStdDev(values, mean)
+      const cv = mean === 0 ? 0 : (std / Math.abs(mean)) * 100
+      parts.push(`${node.name}:CV${cv.toFixed(1)}%`)
+    })
+    return parts.length === 0 ? '数据不足' : parts.join('; ')
+  }
+
   // 连接模拟
   function connect() {
     isConnected.value = true
@@ -277,6 +569,16 @@ export const useOpcuaStore = defineStore('opcua', () => {
   // 计算属性
   const activeAlarmsCount = computed(() => alarms.value.filter(a => !a.acknowledged).length)
   const criticalAlarmsCount = computed(() => alarms.value.filter(a => a.severity === 'Critical' && !a.acknowledged).length)
+  const worstRiskLevel = computed(() => {
+    const order: RiskLevel[] = ['CRITICAL', 'WARNING', 'FAIR', 'GOOD', 'EXCELLENT']
+    let worst: RiskLevel = 'EXCELLENT'
+    for (const s of healthScores.value) {
+      if (order.indexOf(s.riskLevel) < order.indexOf(worst)) {
+        worst = s.riskLevel
+      }
+    }
+    return worst
+  })
 
   return {
     // 状态
@@ -287,6 +589,7 @@ export const useOpcuaStore = defineStore('opcua', () => {
     realTimeData,
     isConnected,
     dataHistory,
+    healthScores,
     // 方法
     initNodeTree,
     simulateDataUpdate,
@@ -298,8 +601,10 @@ export const useOpcuaStore = defineStore('opcua', () => {
     connect,
     disconnect,
     getAllVariableNodes,
+    calculateAllHealthScores,
     // 计算属性
     activeAlarmsCount,
-    criticalAlarmsCount
+    criticalAlarmsCount,
+    worstRiskLevel
   }
 })

@@ -7,6 +7,12 @@
         <h1 class="app-title">OPC-UA 工业节点浏览与数据采集</h1>
       </div>
       <div class="header-right">
+        <el-tooltip content="最高风险等级" placement="bottom">
+          <div class="risk-indicator" :style="{ background: worstRiskColor, boxShadow: `0 0 8px ${worstRiskColor}` }">
+            <el-icon :size="16"><WarningFilled /></el-icon>
+            <span>{{ worstRiskLabel }}</span>
+          </div>
+        </el-tooltip>
         <el-badge :value="store.activeAlarmsCount" :max="99" class="alarm-badge">
           <el-icon :size="20" class="text-yellow-400"><Bell /></el-icon>
         </el-badge>
@@ -35,9 +41,16 @@
         <NodeTree />
       </aside>
 
-      <!-- 中央区域: 仪表盘 -->
+      <!-- 中央区域 -->
       <main class="center-panel">
-        <DataDashboard />
+        <el-tabs v-model="activeTab" class="main-tabs">
+          <el-tab-pane label="实时仪表盘" name="dashboard">
+            <DataDashboard />
+          </el-tab-pane>
+          <el-tab-pane label="设备健康评分" name="health">
+            <HealthScore />
+          </el-tab-pane>
+        </el-tabs>
       </main>
 
       <!-- 右侧面板: 报警列表 -->
@@ -104,20 +117,42 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { Monitor, Bell, CircleCheck, CircleClose } from '@element-plus/icons-vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { Monitor, Bell, CircleCheck, CircleClose, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useOpcuaStore } from './store/opcua'
 import NodeTree from './components/NodeTree.vue'
 import DataDashboard from './components/DataDashboard.vue'
-import type { AlarmEvent } from './types'
+import HealthScore from './components/HealthScore.vue'
+import type { AlarmEvent, RiskLevel } from './types'
 
 const store = useOpcuaStore()
 const updateTimer = ref<number | null>(null)
+const healthTimer = ref<number | null>(null)
+const activeTab = ref('health')
 
 const criticalCount = computed(() =>
   store.alarms.filter(a => a.severity === 'Critical' && !a.acknowledged).length
 )
+
+const RISK_COLOR_MAP: Record<RiskLevel, string> = {
+  EXCELLENT: '#10b981',
+  GOOD: '#22d3ee',
+  FAIR: '#eab308',
+  WARNING: '#f97316',
+  CRITICAL: '#ef4444'
+}
+
+const RISK_LABEL_MAP: Record<RiskLevel, string> = {
+  EXCELLENT: '优秀',
+  GOOD: '良好',
+  FAIR: '一般',
+  WARNING: '警告',
+  CRITICAL: '危险'
+}
+
+const worstRiskColor = computed(() => RISK_COLOR_MAP[store.worstRiskLevel] || '#10b981')
+const worstRiskLabel = computed(() => RISK_LABEL_MAP[store.worstRiskLevel] || '优秀')
 
 function toggleConnection() {
   if (store.isConnected) {
@@ -126,10 +161,15 @@ function toggleConnection() {
       clearInterval(updateTimer.value)
       updateTimer.value = null
     }
+    if (healthTimer.value) {
+      clearInterval(healthTimer.value)
+      healthTimer.value = null
+    }
     ElMessage.warning('已断开 OPC-UA 连接')
   } else {
     store.connect()
     startSimulation()
+    startHealthScoreCalculation()
     ElMessage.success('已连接 OPC-UA 服务器')
   }
 }
@@ -138,6 +178,13 @@ function startSimulation() {
   updateTimer.value = window.setInterval(() => {
     store.simulateDataUpdate()
   }, 1000)
+}
+
+function startHealthScoreCalculation() {
+  setTimeout(() => store.calculateAllHealthScores(), 100)
+  healthTimer.value = window.setInterval(() => {
+    store.calculateAllHealthScores()
+  }, 5000)
 }
 
 function getSeverityType(severity: AlarmEvent['severity']) {
@@ -167,11 +214,15 @@ function formatTime(timestamp: number): string {
 onMounted(() => {
   store.connect()
   startSimulation()
+  startHealthScoreCalculation()
 })
 
 onUnmounted(() => {
   if (updateTimer.value) {
     clearInterval(updateTimer.value)
+  }
+  if (healthTimer.value) {
+    clearInterval(healthTimer.value)
   }
 })
 </script>
@@ -338,5 +389,63 @@ onUnmounted(() => {
 
 .alarm-badge {
   cursor: pointer;
+}
+
+.risk-indicator {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 14px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: default;
+  transition: all 0.3s;
+}
+
+.main-tabs {
+  height: 100%;
+}
+
+.main-tabs :deep(.el-tabs__header) {
+  margin: 0;
+  padding: 0 12px;
+  background: rgba(30, 41, 59, 0.6);
+  border-bottom: 1px solid rgba(71, 85, 105, 0.5);
+}
+
+.main-tabs :deep(.el-tabs__nav-wrap::after) {
+  background-color: rgba(71, 85, 105, 0.5);
+}
+
+.main-tabs :deep(.el-tabs__item) {
+  color: #64748b;
+  font-weight: 500;
+  height: 44px;
+  line-height: 44px;
+}
+
+.main-tabs :deep(.el-tabs__item:hover) {
+  color: #22d3ee;
+}
+
+.main-tabs :deep(.el-tabs__item.is-active) {
+  color: #22d3ee;
+  font-weight: 600;
+}
+
+.main-tabs :deep(.el-tabs__active-bar) {
+  background-color: #06b6d4;
+}
+
+.main-tabs :deep(.el-tabs__content) {
+  height: calc(100% - 45px);
+  overflow: hidden;
+}
+
+.main-tabs :deep(.el-tab-pane) {
+  height: 100%;
+  overflow: hidden;
 }
 </style>

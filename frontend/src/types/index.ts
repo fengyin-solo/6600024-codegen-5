@@ -34,6 +34,7 @@ export interface AlarmEvent {
   acknowledged: boolean
   value?: number | boolean | string
   threshold?: number
+  deviceId?: string
 }
 
 // 订阅配置
@@ -59,4 +60,43 @@ export interface NodeDetail {
   currentValue?: DataValue
   history?: HistoryDataPoint[]
   subscriptions?: SubscriptionConfig[]
+}
+
+// 风险等级枚举
+export type RiskLevel = 'EXCELLENT' | 'GOOD' | 'FAIR' | 'WARNING' | 'CRITICAL'
+
+// 维度评分
+export interface DimensionScore {
+  score: number
+  weight: number
+  weightedScore: number
+  detail: string
+}
+
+// 节点健康明细
+export interface NodeHealthDetail {
+  nodeId: string
+  nodeName: string
+  quality: 'Good' | 'Bad' | 'Uncertain'
+  currentValue: number
+  unit?: string
+  fluctuationRate: number
+  alarmCount: number
+  highestAlarmSeverity: string
+}
+
+// 设备健康评分
+export interface DeviceHealthScore {
+  deviceId: string
+  deviceName: string
+  description?: string
+  totalScore: number
+  riskLevel: RiskLevel
+  riskLevelLabel: string
+  riskColor: string
+  qualityScore: DimensionScore
+  alarmScore: DimensionScore
+  fluctuationScore: DimensionScore
+  nodeDetails: NodeHealthDetail[]
+  updateTime: number
 }

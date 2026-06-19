@@ -25,6 +25,15 @@ public class OpcuaClientService {
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
     private final Random random = new Random();
 
+    private static final int HISTORY_SIZE = 60;
+    private final Map<String, Deque<Double>> valueHistory = new ConcurrentHashMap<>();
+
+    private final AlarmService alarmService;
+
+    public OpcuaClientService(AlarmService alarmService) {
+        this.alarmService = alarmService;
+    }
+
     private boolean connected = false;
     private String serverUrl = "opc.tcp://localhost:4840";
 
@@ -133,14 +142,97 @@ public class OpcuaClientService {
         NodeModel node = nodeCache.get(nodeId);
         if (node != null && "Variable".equals(node.getType())) {
             double variation = (random.nextDouble() - 0.5) * 2 * range;
+            double doubleValue;
             if ("Int32".equals(dataType)) {
-                node.setValue((int) (baseValue + variation));
+                int intVal = (int) (baseValue + variation);
+                node.setValue(intVal);
+                doubleValue = intVal;
             } else {
-                node.setValue(Math.round((baseValue + variation) * 100.0) / 100.0);
+                doubleValue = Math.round((baseValue + variation) * 100.0) / 100.0;
+                node.setValue(doubleValue);
             }
-            // 模拟质量码
             node.setQuality(random.nextDouble() > 0.97 ? "Uncertain" : "Good");
+
+            Deque<Double> history = valueHistory.computeIfAbsent(nodeId, k -> new LinkedList<>());
+            history.addLast(doubleValue);
+            while (history.size() > HISTORY_SIZE) {
+                history.removeFirst();
+            }
+
+            checkAndRecordAlarm(nodeId, node, doubleValue);
         }
+    }
+
+    private void checkAndRecordAlarm(String nodeId, NodeModel node, double value) {
+        switch (nodeId) {
+            case "temp_sensor":
+                if (value > 30) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "Critical",
+                            String.format("温度严重过高: %.1f°C (阈值: 30°C)", value), value, 30.0);
+                } else if (value > 28) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "High",
+                            String.format("温度过高: %.1f°C (阈值: 28°C)", value), value, 28.0);
+                } else if (value > 27) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "Medium",
+                            String.format("温度偏高: %.1f°C (阈值: 27°C)", value), value, 27.0);
+                }
+                break;
+            case "pressure_transmitter":
+                if (value > 4.5) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "Critical",
+                            String.format("压力严重超限: %.2f MPa (阈值: 4.5 MPa)", value), value, 4.5);
+                } else if (value > 4.0) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "High",
+                            String.format("压力超限: %.2f MPa (阈值: 4.0 MPa)", value), value, 4.0);
+                } else if (value > 3.8) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "Medium",
+                            String.format("压力偏高: %.2f MPa (阈值: 3.8 MPa)", value), value, 3.8);
+                }
+                break;
+            case "motor_speed":
+                if (value > 1600) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "Critical",
+                            String.format("电机转速严重过高: %.0f RPM (阈值: 1600 RPM)", value), value, 1600);
+                } else if (value > 1550) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "High",
+                            String.format("电机转速过高: %.0f RPM (阈值: 1550 RPM)", value), value, 1550);
+                } else if (value > 1520) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "Medium",
+                            String.format("电机转速偏高: %.0f RPM (阈值: 1520 RPM)", value), value, 1520);
+                }
+                break;
+            case "flow_meter":
+                if (value > 200) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "High",
+                            String.format("流量过高: %.1f L/min (阈值: 200 L/min)", value), value, 200.0);
+                } else if (value < 100) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "Medium",
+                            String.format("流量过低: %.1f L/min (阈值: 100 L/min)", value), value, 100.0);
+                }
+                break;
+            case "valve_position":
+                if (value > 95) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "Medium",
+                            String.format("阀门接近全开: %.0f%% (阈值: 95%%)", value), value, 95.0);
+                } else if (value < 5) {
+                    alarmService.recordAlarm(nodeId, node.getName(), "Medium",
+                            String.format("阀门接近全关: %.0f%% (阈值: 5%%)", value), value, 5.0);
+                }
+                break;
+        }
+    }
+
+    public NodeModel getDeviceNode(String deviceId) {
+        return nodeCache.get(deviceId);
+    }
+
+    public double[] getValueHistory(String nodeId) {
+        Deque<Double> deque = valueHistory.get(nodeId);
+        if (deque == null || deque.isEmpty()) return null;
+        double[] result = new double[deque.size()];
+        int i = 0;
+        for (Double v : deque) result[i++] = v;
+        return result;
     }
 
     /**
